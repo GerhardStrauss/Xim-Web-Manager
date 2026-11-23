@@ -1,0 +1,27 @@
+{
+  "entities": {
+    "XimProfile": {
+      "title": "Xim Profile",
+      "description": "User created Xim game configuration.",
+      "type": "object",
+      "properties": {
+        "game": { "type": "string" },
+        "console": { "type": "string" },
+        "hip": { "type": "object" },
+        "ads": { "type": "object" },
+        "bindings": { "type": "array" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "isFavorite": { "type": "boolean" },
+        "userId": { "type": "string" }
+      },
+      "required": ["game", "console", "userId", "createdAt"]
+    }
+  },
+  "firestore": {
+    "users/{userId}/configs/{configId}": {
+      "schema": { "$ref": "#/entities/XimProfile" },
+      "description": "Game configurations for a user."
+    }
+  }
+}

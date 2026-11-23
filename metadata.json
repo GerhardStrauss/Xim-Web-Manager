@@ -1,0 +1,6 @@
+{
+  "name": "XIM Web Manager",
+  "description": "A web-based configuration manager for XIM4 devices.",
+  "requestFramePermissions": ["bluetooth", "serial", "usb"],
+  "majorCapabilities": []
+}

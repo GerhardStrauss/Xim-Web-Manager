@@ -1,0 +1,56 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Since we only want Google SignIn, we can bypass email_verified if it's not strictly enforced by standard sign in, 
+    // actually Google SignIn accounts are implicitly verified. 
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    function isValidProfile(data) {
+      return data.keys().hasAll(['game', 'console', 'userId', 'createdAt']) &&
+             data.game is string && data.game.size() > 0 && data.game.size() <= 100 &&
+             data.console is string && data.console.size() > 0 && data.console.size() <= 50 &&
+             data.userId == request.auth.uid &&
+             (data.get('isFavorite', false) is bool) &&
+             data.createdAt is number;
+    }
+
+    match /users/{userId} {
+      match /configs/{configId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(configId) &&
+                         isValidProfile(incoming());
+        allow update: if isOwner(userId) &&
+                         isValidId(userId) &&
+                         isValidId(configId) &&
+                         isValidProfile(incoming()) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           incoming().diff(existing()).affectedKeys().hasOnly(['game', 'console', 'color', 'hotkey', 'secondaryActivationKey', 'hip', 'ads', 'bindings', 'updatedAt', 'isFavorite'])
+                         );
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(configId);
+        // Secure list query
+        // The read already restricts to isOwner(userId)
+      }
+    }
+  }
+}

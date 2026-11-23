@@ -1,0 +1,79 @@
+name: Build Android APK & ZIP Package
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Compile Native XIM4 Bluetooth SPP Android APK (.zip)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Java JDK 17 (Required for Android Gradle & Capacitor)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install web dependencies & Capacitor Android + Bluetooth Classic SPP plugin
+        run: |
+          npm install
+          npm install @capacitor/core @capacitor/cli @capacitor/android cordova-plugin-bluetooth-serial
+
+      - name: Build production web app bundle
+        run: npm run build
+
+      - name: Initialize & Sync Capacitor Android Platform
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Inject Android 12-14+ Bluetooth Classic SPP (RFCOMM) Permissions into AndroidManifest.xml
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            sed -i 's/<application/<uses-permission android:name="android.permission.BLUETOOTH" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" \/>\n    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" \/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" \/>\n    <application/' "$MANIFEST"
+          fi
+
+      - name: Build Android APK via Gradle
+        working-directory: ./android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Package APK into xim-web-manager-android-apk.zip
+        run: |
+          mkdir -p release_out
+          cp android/app/build/outputs/apk/debug/app-debug.apk release_out/xim-web-manager.apk
+          cat << 'EOF' > release_out/README-INSTALL.txt
+          XIM Web Manager — Native Android APK (Bluetooth Classic SPP 0x1101 Edition)
+          ===========================================================================
+          1. Extract "xim-web-manager.apk" from this .zip file on your Android phone.
+          2. Tap "xim-web-manager.apk" to install (allow "Install unknown apps" if prompted).
+          3. Press the 'P' button on the back of your XIM4 until it flashes Cyan/Blue, and pair XIM4 in Android Bluetooth Settings.
+          4. Open the XIM Web Manager app, allow the "Nearby Devices" permission, and tap "Connect Hardware -> Native Android Bluetooth Classic SPP".
+          EOF
+          cd release_out
+          zip -r ../xim-web-manager-android-apk.zip xim-web-manager.apk README-INSTALL.txt
+
+      - name: Upload xim-web-manager-android-apk.zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xim-web-manager-android-apk-zip
+          path: xim-web-manager-android-apk.zip
+          if-no-files-found: error
