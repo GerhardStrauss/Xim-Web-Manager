@@ -32,8 +32,8 @@ jobs:
 
       - name: Install web dependencies & Capacitor Android + Bluetooth Classic SPP plugin
         run: |
-          npm install
-          npm install @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 cordova-plugin-bluetooth-serial
+          npm install --legacy-peer-deps
+          npm install --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 cordova-plugin-bluetooth-serial
 
       - name: Build production web app bundle
         run: npm run build

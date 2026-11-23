@@ -187,11 +187,11 @@ export const AndroidApkModal: React.FC<AndroidApkModalProps> = ({
 set -e
 
 echo "[1/5] Installing web dependencies & building production bundle..."
-npm install
+npm install --legacy-peer-deps
 npm run build
 
 echo "[2/5] Installing Capacitor Android & Bluetooth Classic SPP plugin..."
-npm install @capacitor/core @capacitor/cli @capacitor/android cordova-plugin-bluetooth-serial
+npm install --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 cordova-plugin-bluetooth-serial
 
 echo "[3/5] Initializing Capacitor Android platform..."
 if [ ! -d "android" ]; then
@@ -282,8 +282,8 @@ jobs:
 
       - name: Install web dependencies & Capacitor Android + Bluetooth Classic SPP plugin
         run: |
-          npm install
-          npm install @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 cordova-plugin-bluetooth-serial
+          npm install --legacy-peer-deps
+          npm install --legacy-peer-deps @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 cordova-plugin-bluetooth-serial
 
       - name: Build production web app bundle
         run: npm run build
