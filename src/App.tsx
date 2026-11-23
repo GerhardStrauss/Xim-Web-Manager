@@ -330,7 +330,30 @@ export default function App() {
   const [showAndroidApkModal, setShowAndroidApkModal] = useState(false);
   const [showSidebarOptionsMenu, setShowSidebarOptionsMenu] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
-  const [profiles, setProfiles] = useState<XimProfile[]>([MOCK_PROFILE, MOCK_PROFILE2, MOCK_PROFILE3, MOCK_PROFILE4]);
+  const [isOfflineMode, setIsOfflineMode] = useState<boolean>(() => {
+    if (localStorage.getItem('xim_standalone_mode') === 'true') return true;
+    const isCapacitorNative =
+      typeof window !== 'undefined' &&
+      (Boolean((window as any).Capacitor?.isNativePlatform?.()) ||
+        Boolean((window as any).Capacitor) ||
+        Boolean((window as any).bluetoothSerial) ||
+        window.location.hostname === 'localhost' ||
+        window.location.protocol === 'capacitor:' ||
+        window.location.protocol === 'file:');
+    return isCapacitorNative;
+  });
+  const [profiles, setProfiles] = useState<XimProfile[]>(() => {
+    try {
+      const saved = localStorage.getItem('xim_local_profiles');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {
+      console.warn('Failed to parse local profiles:', e);
+    }
+    return [MOCK_PROFILE, MOCK_PROFILE2, MOCK_PROFILE3, MOCK_PROFILE4];
+  });
   const [activeProfileId, setActiveProfileId] = useState<string>('gta-1');
   const [activeTab, setActiveTab] = useState<'HIP' | 'ADS' | 'BUTTONS'>('HIP');
   const [activeBindingTab, setActiveBindingTab] = useState<'primary' | 'secondary'>('primary');
@@ -397,11 +420,30 @@ export default function App() {
 
   const [user, setUser] = useState<User | null | undefined>(undefined);
 
+  // Persist profiles to localStorage whenever they change so Android APK works 100% offline without Firebase Auth
   useEffect(() => {
+    try {
+      localStorage.setItem('xim_local_profiles', JSON.stringify(profiles));
+    } catch (e) {
+      console.warn('Could not save profiles to localStorage:', e);
+    }
+  }, [profiles]);
+
+  useEffect(() => {
+    // Re-check after Cordova/Capacitor deviceready fires on Android APK
+    const onDeviceReady = () => {
+      if ((window as any).bluetoothSerial || (window as any).Capacitor) {
+        setIsOfflineMode(true);
+      }
+    };
+    document.addEventListener('deviceready', onDeviceReady, false);
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
     });
-    return () => unsubscribe();
+    return () => {
+      document.removeEventListener('deviceready', onDeviceReady, false);
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -491,29 +533,31 @@ export default function App() {
   };
 
   const createProfile = async () => {
-    if (!user) return;
     const newProfile: XimProfile = {
       id: Math.random().toString(36).substring(7),
       game: 'Grand Theft Auto V',
-      console: 'PS4',
+      console: 'Xbox One',
       hip: { ...MOCK_PROFILE.hip },
       ads: { ...MOCK_PROFILE.ads },
-      bindings: generateDefaultBindings('Grand Theft Auto V', 'PS4'),
+      bindings: generateDefaultBindings('Grand Theft Auto V', 'Xbox One'),
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      userId: user.uid,
+      userId: user?.uid || 'local-android-user',
       isFavorite: false
     };
-    try {
-      await setDoc(doc(db, `users/${user.uid}/configs`, newProfile.id), newProfile);
-      setActiveProfileId(newProfile.id);
-    } catch (error) {
-       handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/configs/${newProfile.id}`);
+    setProfiles(prev => [newProfile, ...prev]);
+    setActiveProfileId(newProfile.id);
+    if (user) {
+      try {
+        await setDoc(doc(db, `users/${user.uid}/configs`, newProfile.id), newProfile);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}/configs/${newProfile.id}`);
+      }
     }
   };
 
   const updateActiveProfile = async (updates: Partial<XimProfile>) => {
-    if (!activeProfile || !user) return;
+    if (!activeProfile) return;
     
     let newBindings = activeProfile.bindings;
     if (updates.game && updates.game !== activeProfile.game) {
@@ -525,9 +569,11 @@ export default function App() {
     }
     
     const updatedProfile = { ...activeProfile, ...updates, updatedAt: Date.now() };
-    // Optimistic update
+    // Optimistic update (also saved automatically to localStorage)
     setProfiles(profiles.map(p => p.id === activeProfile.id ? updatedProfile : p));
-    await saveProfileToDb(updatedProfile);
+    if (user) {
+      await saveProfileToDb(updatedProfile);
+    }
   };
 
   const updateSettings = (mode: 'hip' | 'ads', setting: string, value: any) => {
@@ -637,10 +683,17 @@ export default function App() {
     }
   };
 
-  if (user === undefined) return null; // Still checking auth state
+  if (user === undefined && !isOfflineMode) return null; // Still checking auth state
 
-  if (!user && !showSplash) {
-    return <Login />;
+  if (!user && !isOfflineMode && !showSplash) {
+    return (
+      <Login
+        onContinueOffline={() => {
+          localStorage.setItem('xim_standalone_mode', 'true');
+          setIsOfflineMode(true);
+        }}
+      />
+    );
   }
 
   const sortedProfiles = [...profiles].sort((a, b) => {
@@ -980,24 +1033,34 @@ export default function App() {
               <button 
                 className="bg-white/5 border border-white/10 rounded text-red-400 hover:text-red-300 hover:bg-red-900/20 px-3 md:px-4 py-2.5 md:py-2 flex items-center gap-2 md:ml-1 transition-colors shrink-0"
                 onClick={async () => {
-                  if (window.confirm("Delete this config?")) {
+                  if (profiles.length <= 1) return;
+                  const remaining = profiles.filter(p => p.id !== activeProfile.id);
+                  setProfiles(remaining);
+                  setActiveProfileId(remaining[0].id);
+                  if (user) {
                     try {
-                      await deleteDoc(doc(db, `users/${user!.uid}/configs`, activeProfile.id));
+                      await deleteDoc(doc(db, `users/${user.uid}/configs`, activeProfile.id));
                     } catch(e) {
-                       handleFirestoreError(e, OperationType.DELETE, `users/${user!.uid}/configs/${activeProfile.id}`);
+                      handleFirestoreError(e, OperationType.DELETE, `users/${user.uid}/configs/${activeProfile.id}`);
                     }
                   }
                 }}
               >
                 <Trash2 size={14} />
               </button>
-              <button 
-                className="bg-white/5 border border-white/10 rounded text-slate-400 hover:text-slate-300 hover:bg-white/10 px-3 md:px-4 py-2.5 md:py-2 flex items-center gap-2 md:ml-1 transition-colors shrink-0"
-                onClick={() => signOut(auth)}
-                title="Log Out"
-              >
-                <LogOut size={14} />
-              </button>
+              {user && (
+                <button 
+                  className="bg-white/5 border border-white/10 rounded text-slate-400 hover:text-slate-300 hover:bg-white/10 px-3 md:px-4 py-2.5 md:py-2 flex items-center gap-2 md:ml-1 transition-colors shrink-0"
+                  onClick={() => {
+                    localStorage.removeItem('xim_standalone_mode');
+                    setIsOfflineMode(false);
+                    signOut(auth);
+                  }}
+                  title="Log Out"
+                >
+                  <LogOut size={14} />
+                </button>
+              )}
             </div>
           </div>
 

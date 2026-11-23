@@ -1,9 +1,13 @@
 import { signInWithPopup } from 'firebase/auth';
 import { auth, googleProvider } from './lib/firebase';
-import { Cpu } from 'lucide-react';
+import { Cpu, Smartphone, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
 
-export default function Login() {
+interface LoginProps {
+  onContinueOffline?: () => void;
+}
+
+export default function Login({ onContinueOffline }: LoginProps) {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -14,10 +18,16 @@ export default function Login() {
       await signInWithPopup(auth, googleProvider);
     } catch (error: any) {
       console.error(error);
-      if (error?.code === 'auth/unauthorized-domain') {
-        setErrorMessage(`Domain "${window.location.hostname}" is not authorized in Firebase Auth. Please refresh or check authorized domains.`);
+      if (
+        error?.code === 'auth/unauthorized-domain' ||
+        error?.code === 'auth/operation-not-supported-in-this-environment' ||
+        error?.code === 'auth/popup-blocked'
+      ) {
+        setErrorMessage(
+          `Native Android APK / WebView blocks Google OAuth browser popups (${error?.code}). Tap "Enter Standalone Hardware Mode" below to use the app and flash your XIM4!`
+        );
       } else if (error?.code !== 'auth/popup-closed-by-user') {
-        setErrorMessage(error?.message || 'Failed to sign in. Please try again.');
+        setErrorMessage(error?.message || 'Failed to sign in. You can continue in Standalone Hardware Mode below.');
       }
     } finally {
       setLoading(false);
@@ -35,7 +45,7 @@ export default function Login() {
         <p className="text-slate-500 uppercase tracking-widest text-xs font-semibold mb-8 text-center">Profile Manager</p>
 
         {errorMessage && (
-          <div className="w-full mb-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-mono text-center">
+          <div className="w-full mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-mono text-center leading-relaxed">
             {errorMessage}
           </div>
         )}
@@ -50,8 +60,23 @@ export default function Login() {
           </div>
           <span className="group-hover:text-cyan-400 transition-colors">{loading ? 'Authenticating...' : 'Sign in with Google'}</span>
         </button>
+
+        {onContinueOffline && (
+          <div className="w-full mt-4 pt-4 border-t border-white/10 flex flex-col gap-2">
+            <button
+              onClick={onContinueOffline}
+              className="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-mono font-bold tracking-widest text-xs uppercase py-3.5 px-4 rounded-lg flex items-center justify-center gap-2.5 transition-all shadow-[0_0_20px_rgba(6,182,212,0.3)]"
+            >
+              <Smartphone size={16} />
+              <span>Enter Standalone Hardware Mode</span>
+            </button>
+            <p className="text-[10px] text-slate-400 text-center font-mono flex items-center justify-center gap-1">
+              <ShieldCheck size={12} className="text-emerald-400 shrink-0" />
+              <span>Recommended for Android APK &amp; Direct XIM4 Flashing</span>
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );
 }
-
