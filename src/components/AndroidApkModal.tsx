@@ -248,10 +248,107 @@ the /public folder of this web app, clicking "Download Android APK (.zip)" in
 the web app will serve the compiled APK .zip directly to any phone!)
 `;
 
+    const githubWorkflowYml = `name: Build Android APK & ZIP Package
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    name: Compile Native XIM4 Bluetooth SPP Android APK (.zip)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Java JDK 21 (Required for Capacitor 6/7/8 & Android Gradle)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Accept Android SDK Licenses (Using GitHub Runner Pre-installed Android SDK)
+        run: |
+          echo "Using pre-installed Android SDK at: $ANDROID_HOME"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Install web dependencies & Capacitor Android + Bluetooth Classic SPP plugin
+        run: |
+          npm install
+          npm install @capacitor/core@^6.0.0 @capacitor/cli@^6.0.0 @capacitor/android@^6.0.0 cordova-plugin-bluetooth-serial
+
+      - name: Build production web app bundle
+        run: npm run build
+
+      - name: Initialize & Sync Capacitor Android Platform
+        run: |
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
+          npx cap sync android
+
+      - name: Inject Android 12-14+ Bluetooth Classic SPP (RFCOMM) Permissions into AndroidManifest.xml
+        run: |
+          node -e '
+            const fs = require("fs");
+            const manifestPath = "android/app/src/main/AndroidManifest.xml";
+            if (fs.existsSync(manifestPath)) {
+              let xml = fs.readFileSync(manifestPath, "utf8");
+              const perms = [
+                "android.permission.BLUETOOTH",
+                "android.permission.BLUETOOTH_ADMIN",
+                "android.permission.BLUETOOTH_CONNECT",
+                "android.permission.BLUETOOTH_SCAN",
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.ACCESS_COARSE_LOCATION"
+              ];
+              let tagsToAdd = "";
+              for (const p of perms) {
+                if (!xml.includes(p)) {
+                  tagsToAdd += "    <uses-permission android:name=\\"" + p + "\\" />\\n";
+                }
+              }
+              if (tagsToAdd) {
+                xml = xml.replace("<application", tagsToAdd + "    <application");
+                fs.writeFileSync(manifestPath, xml, "utf8");
+              }
+            }
+          '
+
+      - name: Build Android APK via Gradle
+        working-directory: ./android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Package APK into xim-web-manager-android-apk.zip
+        run: |
+          mkdir -p release_out
+          cp android/app/build/outputs/apk/debug/app-debug.apk release_out/XIM4-Web-Manager-SPP.apk
+          cd release_out
+          zip -r ../xim-web-manager-android-apk.zip XIM4-Web-Manager-SPP.apk
+
+      - name: Upload xim-web-manager-android-apk.zip Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xim-web-manager-android-apk-zip
+          path: xim-web-manager-android-apk.zip
+          if-no-files-found: error
+`;
+
     const zipBytes = createZipArchive([
       { name: 'README-INSTALL-APK.txt', content: readmeTxt },
       { name: 'capacitor.config.json', content: capacitorConfig },
       { name: 'build-android-apk.sh', content: buildScriptSh },
+      { name: '.github/workflows/build-android-apk.yml', content: githubWorkflowYml },
     ]);
 
     const blob = new Blob([zipBytes as unknown as BlobPart], { type: 'application/zip' });
