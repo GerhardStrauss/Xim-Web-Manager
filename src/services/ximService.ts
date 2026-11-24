@@ -196,20 +196,92 @@ class XimService {
    * Connects directly over Android OS BluetoothAdapter RFCOMM Socket (SPP UUID 00001101-0000-1000-8000-00805f9b34fb)
    * without any browser sandbox limitations.
    */
+  public hasNativeBluetoothSerialPlugin(): boolean {
+    return typeof window !== 'undefined' && Boolean((window as any).bluetoothSerial);
+  }
+
+  public async ensureNativeAndroidBluetoothEnabled(): Promise<void> {
+    const btSerial = (window as any).bluetoothSerial;
+    if (!btSerial) return;
+    if (typeof btSerial.isEnabled === 'function') {
+      const enabled = await new Promise<boolean>((resolve) => {
+        btSerial.isEnabled(
+          () => resolve(true),
+          () => resolve(false)
+        );
+      });
+      if (!enabled && typeof btSerial.enable === 'function') {
+        await new Promise<void>((resolve, reject) => {
+          btSerial.enable(
+            () => resolve(),
+            (err: any) => reject(new Error(typeof err === 'string' ? err : 'Please turn on Bluetooth on your Android phone.'))
+          );
+        });
+      }
+    }
+  }
+
   public async listNativeAndroidPairedDevices(): Promise<NativePairedBluetoothDevice[]> {
     const btSerial = (window as any).bluetoothSerial;
     if (!btSerial) {
       throw new Error('Native Android Bluetooth Serial plugin is only available inside the compiled Android APK.');
     }
+    await this.ensureNativeAndroidBluetoothEnabled();
     return new Promise((resolve, reject) => {
       btSerial.list(
         (devices: NativePairedBluetoothDevice[]) => resolve(devices || []),
-        (err: any) => reject(new Error(typeof err === 'string' ? err : 'Failed to list paired Bluetooth devices. Ensure Nearby Devices permission is allowed.'))
+        (err: any) =>
+          reject(
+            new Error(
+              typeof err === 'string'
+                ? err
+                : 'Failed to list paired Bluetooth devices. Please grant "Nearby Devices" and "Location" permissions in Android App Settings.'
+            )
+          )
       );
     });
   }
 
-  public async connectNativeAndroidSPP(targetMacOrAuto?: string): Promise<TransportDiagnostics> {
+  public async discoverNativeAndroidUnpairedDevices(
+    onDeviceFound?: (device: NativePairedBluetoothDevice) => void
+  ): Promise<NativePairedBluetoothDevice[]> {
+    const btSerial = (window as any).bluetoothSerial;
+    if (!btSerial || typeof btSerial.discoverUnpaired !== 'function') {
+      return [];
+    }
+    await this.ensureNativeAndroidBluetoothEnabled();
+
+    if (onDeviceFound && typeof btSerial.setDeviceDiscoveredListener === 'function') {
+      btSerial.setDeviceDiscoveredListener((device: NativePairedBluetoothDevice) => {
+        if (device && (device.address || device.id)) {
+          onDeviceFound(device);
+        }
+      });
+    }
+
+    return new Promise((resolve) => {
+      btSerial.discoverUnpaired(
+        (devices: NativePairedBluetoothDevice[]) => {
+          if (typeof btSerial.clearDeviceDiscoveredListener === 'function') {
+            btSerial.clearDeviceDiscoveredListener();
+          }
+          resolve(devices || []);
+        },
+        (err: any) => {
+          console.warn('Native Android discoverUnpaired warning:', err);
+          if (typeof btSerial.clearDeviceDiscoveredListener === 'function') {
+            btSerial.clearDeviceDiscoveredListener();
+          }
+          resolve([]);
+        }
+      );
+    });
+  }
+
+  public async connectNativeAndroidSPP(
+    targetMacOrAuto?: string,
+    targetDeviceName?: string
+  ): Promise<TransportDiagnostics> {
     const btSerial = (window as any).bluetoothSerial;
     if (!btSerial) {
       throw new Error(
@@ -217,27 +289,66 @@ class XimService {
       );
     }
 
-    const devices = await this.listNativeAndroidPairedDevices();
-    if (devices.length === 0) {
-      throw new Error('No paired Bluetooth devices found. Pair your XIM4 in Android Bluetooth Settings first.');
+    await this.ensureNativeAndroidBluetoothEnabled();
+
+    let address = targetMacOrAuto || '';
+    let resolvedName = targetDeviceName || 'XIM4';
+
+    if (!address) {
+      const devices = await this.listNativeAndroidPairedDevices();
+      if (devices.length === 0) {
+        throw new Error(
+          'No paired Bluetooth devices found. Pair your XIM4 in Android Bluetooth Settings first, or tap "Scan Nearby Unpaired Devices" in the popup.'
+        );
+      }
+
+      const ximDevice =
+        devices.find(d => (d.name || '').toUpperCase().includes('XIM')) || devices[0];
+
+      address = ximDevice.address || ximDevice.id || '';
+      resolvedName = ximDevice.name || 'XIM4';
     }
 
-    // Automatically match XIM4 or use specified MAC address
-    const ximDevice =
-      (targetMacOrAuto && devices.find(d => d.address === targetMacOrAuto || d.id === targetMacOrAuto)) ||
-      devices.find(d => (d.name || '').toUpperCase().includes('XIM')) ||
-      devices[0];
-
-    const address = ximDevice.address || ximDevice.id || '';
     if (!address) {
-      throw new Error('Could not resolve Bluetooth MAC address for XIM4.');
+      throw new Error('Could not resolve Bluetooth MAC address for the selected device.');
+    }
+
+    // Disconnect any previous native session cleanly before opening a new RFCOMM socket
+    if (this.nativeAndroidConnected && typeof btSerial.disconnect === 'function') {
+      await new Promise<void>((resolve) => {
+        btSerial.disconnect(() => resolve(), () => resolve());
+      });
     }
 
     await new Promise<void>((resolve, reject) => {
       btSerial.connect(
         address,
         () => resolve(),
-        (err: any) => reject(new Error(typeof err === 'string' ? err : `RFCOMM connection to ${ximDevice.name} (${address}) failed.`))
+        (err: any) => {
+          // Fallback to connectInsecure if standard secure RFCOMM bond fails
+          if (typeof btSerial.connectInsecure === 'function') {
+            btSerial.connectInsecure(
+              address,
+              () => resolve(),
+              (err2: any) =>
+                reject(
+                  new Error(
+                    typeof err2 === 'string'
+                      ? err2
+                      : `RFCOMM connection to ${resolvedName} (${address}) failed. Make sure your XIM4 is powered on and within range.`
+                  )
+                )
+            );
+          } else {
+            reject(
+              new Error(
+                typeof err === 'string'
+                  ? err
+                  : `RFCOMM connection to ${resolvedName} (${address}) failed.`
+              )
+            );
+          }
+        }
       );
     });
 
@@ -263,7 +374,7 @@ class XimService {
 
     this.transportDiagnostics = {
       transportType: 'native-android-spp',
-      deviceName: `${ximDevice.name || 'XIM4'} (${address})`,
+      deviceName: `${resolvedName} (${address})`,
       canWriteHardware: true,
       discoveredServices: [
         {
@@ -279,7 +390,7 @@ class XimService {
       usbProductId: null,
       rxPacketsReceived: 0,
       lastRxHex: null,
-      diagnosticNote: `Connected via Native Android APK Bluetooth Classic RFCOMM Socket (0x1101) to ${ximDevice.name} (${address}). Full hardware write & EEPROM flash enabled!`
+      diagnosticNote: `Connected via Native Android APK Bluetooth Classic RFCOMM Socket (0x1101) to ${resolvedName} (${address}). Full hardware write & EEPROM flash enabled!`
     };
 
     return this.transportDiagnostics;

@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { Bluetooth, Settings, Gamepad2, Mouse, Keyboard, Plus, Upload, Download, Trash2, Cpu, Menu, X, Star, LogOut, ChevronUp, ChevronDown, Usb, HelpCircle, ShieldCheck, Zap, Activity, Smartphone } from 'lucide-react';
+import { Bluetooth, Settings, Gamepad2, Mouse, Keyboard, Plus, Upload, Download, Trash2, Cpu, Menu, X, Star, LogOut, ChevronUp, ChevronDown, Usb, HelpCircle, ShieldCheck, Zap, Activity, Smartphone, RefreshCw } from 'lucide-react';
 import { XimProfile, Binding } from './types';
 import { auth, db } from './lib/firebase';
 import { handleFirestoreError, OperationType } from './lib/firebase-errors';
 import { User, onAuthStateChanged, signOut } from 'firebase/auth';
 import { collection, query, onSnapshot, setDoc, doc, deleteDoc, getDocs } from 'firebase/firestore';
 import Login from './Login';
-import { ximService, XimInputEvent } from './services/ximService';
+import { ximService, XimInputEvent, NativePairedBluetoothDevice } from './services/ximService';
 import { HardwareTroubleshooterModal } from './components/HardwareTroubleshooterModal';
 import { FlashHardwareModal } from './components/FlashHardwareModal';
 import { AndroidApkModal } from './components/AndroidApkModal';
@@ -329,6 +329,12 @@ export default function App() {
   const [showFlashModal, setShowFlashModal] = useState(false);
   const [showAndroidApkModal, setShowAndroidApkModal] = useState(false);
   const [showSidebarOptionsMenu, setShowSidebarOptionsMenu] = useState(false);
+  const [showNativeBtPicker, setShowNativeBtPicker] = useState(false);
+  const [nativePairedDevices, setNativePairedDevices] = useState<NativePairedBluetoothDevice[]>([]);
+  const [nativeDiscoveredDevices, setNativeDiscoveredDevices] = useState<NativePairedBluetoothDevice[]>([]);
+  const [isScanningNativeBt, setIsScanningNativeBt] = useState(false);
+  const [connectingNativeMac, setConnectingNativeMac] = useState<string | null>(null);
+  const [scanErrorMessage, setScanErrorMessage] = useState<string | null>(null);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
   const [isOfflineMode, setIsOfflineMode] = useState<boolean>(() => {
     if (localStorage.getItem('xim_standalone_mode') === 'true') return true;
@@ -637,7 +643,85 @@ export default function App() {
     }
   };
 
+  const loadNativeAndroidBluetoothDevices = async (runUnpairedDiscovery: boolean = false) => {
+    setScanErrorMessage(null);
+    setShowNativeBtPicker(true);
+    setShowScanModal(true);
+    setIsScanningNativeBt(true);
+    try {
+      const paired = await ximService.listNativeAndroidPairedDevices();
+      // Sort XIM devices to the top
+      paired.sort((a, b) => {
+        const aXim = (a.name || '').toUpperCase().includes('XIM') ? -1 : 1;
+        const bXim = (b.name || '').toUpperCase().includes('XIM') ? -1 : 1;
+        return aXim - bXim;
+      });
+      setNativePairedDevices(paired);
+
+      if (runUnpairedDiscovery || paired.length === 0) {
+        setNativeDiscoveredDevices([]);
+        await ximService.discoverNativeAndroidUnpairedDevices((foundDev) => {
+          setNativeDiscoveredDevices((prev) => {
+            const addr = foundDev.address || foundDev.id;
+            if (!addr || prev.some((d) => (d.address || d.id) === addr)) return prev;
+            return [...prev, foundDev];
+          });
+        });
+      }
+    } catch (err: any) {
+      setScanErrorMessage(
+        err?.message ||
+          'Could not read Bluetooth devices. Make sure Bluetooth is ON and "Nearby Devices" permission is allowed in Android App Info.'
+      );
+    } finally {
+      setIsScanningNativeBt(false);
+    }
+  };
+
+  const handleSelectNativeAndroidDevice = async (dev: NativePairedBluetoothDevice) => {
+    const addr = dev.address || dev.id || '';
+    if (!addr) return;
+    setScanErrorMessage(null);
+    setConnectingNativeMac(addr);
+    setDeviceState('connecting');
+    try {
+      const diag = await ximService.connectNativeAndroidSPP(addr, dev.name || 'XIM4');
+      setDeviceName(diag.deviceName || `${dev.name || 'XIM4'} (${addr})`);
+      setDeviceState('connected');
+      setShowNativeBtPicker(false);
+      setShowScanModal(false);
+    } catch (err: any) {
+      setDeviceState('disconnected');
+      setScanErrorMessage(
+        err?.message ||
+          `Failed to connect to ${dev.name || addr}. Ensure XIM4 is powered on and paired in Android Bluetooth settings.`
+      );
+    } finally {
+      setConnectingNativeMac(null);
+    }
+  };
+
   const processSerialConnection = async () => {
+    setScanErrorMessage(null);
+    // 1. If running in the Native Android APK with cordova-plugin-bluetooth-serial, open the interactive Device Picker popup!
+    if (ximService.hasNativeBluetoothSerialPlugin()) {
+      await loadNativeAndroidBluetoothDevices(false);
+      return;
+    }
+
+    // 2. If running in the Android APK or mobile browser where neither bluetoothSerial nor Web Serial exists, show a clear diagnostic message
+    if (!('serial' in navigator)) {
+      setShowScanModal(true);
+      setScanErrorMessage(
+        ximService.isNativeAndroidApp()
+          ? 'Native Bluetooth Serial bridge did not respond. Please ensure Bluetooth is turned ON and "Nearby Devices" permission is allowed for XIM Web Manager in Android Settings -> Apps.'
+          : 'Mobile web browsers do not show a Bluetooth Classic SPP picker. Use our Native Android APK (.zip) for the Bluetooth SPP Device Picker, or tap "Web Bluetooth (BLE)" / "USB-OTG" below.'
+      );
+      setDeviceState('disconnected');
+      return;
+    }
+
+    // 3. Desktop Chrome/Edge Web Serial chooser popup
     try {
       setDeviceState('connecting');
       const diag = await ximService.connectSerial(true);
@@ -647,7 +731,9 @@ export default function App() {
     } catch (err: any) {
       console.warn(err);
       setDeviceState('disconnected');
-      setShowScanModal(false);
+      if (err?.name !== 'NotFoundError' && err?.name !== 'AbortError') {
+        setScanErrorMessage(err?.message || 'Bluetooth Classic SPP connection failed.');
+      }
     }
   };
 
@@ -1580,7 +1666,11 @@ export default function App() {
             
             {/* Close Button top-right for easy mobile exit */}
             <button
-              onClick={() => setShowScanModal(false)}
+              onClick={() => {
+                setShowNativeBtPicker(false);
+                setScanErrorMessage(null);
+                setShowScanModal(false);
+              }}
               className="absolute top-3.5 right-3.5 z-20 text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-colors"
               aria-label="Close modal"
             >
@@ -1588,7 +1678,7 @@ export default function App() {
             </button>
 
             {/* Radar Animation */}
-            <div className="relative w-24 h-24 sm:w-36 sm:h-36 flex items-center justify-center mb-4 sm:mb-6 mt-1 sm:mt-2 shrink-0 overflow-hidden rounded-full">
+            <div className="relative w-24 h-24 sm:w-32 sm:h-32 flex items-center justify-center mb-3 sm:mb-4 mt-1 shrink-0 overflow-hidden rounded-full">
                <div className="absolute inset-0 rounded-full border border-cyan-500/10"></div>
                <div className="absolute inset-3 sm:inset-4 rounded-full border border-cyan-500/10"></div>
                <div className="absolute inset-6 sm:inset-8 rounded-full border border-cyan-500/20"></div>
@@ -1598,50 +1688,187 @@ export default function App() {
                <div className="absolute inset-[-50%] animate-[spin_4s_linear_infinite] origin-center opacity-70 pointer-events-none" style={{ background: 'conic-gradient(from 0deg, transparent 0deg 270deg, rgba(6,182,212,0.4) 360deg)', borderRadius: '50%'}}></div>
             </div>
 
-            <h2 className="text-lg sm:text-xl text-white font-mono uppercase tracking-widest font-bold mb-1.5 relative z-10 text-center drop-shadow-[0_0_10px_rgba(6,182,212,0.5)] shrink-0">Scanning nearby</h2>
-            <p className="text-[10px] text-slate-400 text-center mb-5 sm:mb-6 uppercase tracking-[0.2em] relative z-10 leading-relaxed font-semibold shrink-0">
+            <h2 className="text-lg sm:text-xl text-white font-mono uppercase tracking-widest font-bold mb-1 relative z-10 text-center drop-shadow-[0_0_10px_rgba(6,182,212,0.5)] shrink-0">
+              {showNativeBtPicker ? 'Select Bluetooth Device' : 'Scanning nearby'}
+            </h2>
+            <p className="text-[10px] text-slate-400 text-center mb-4 uppercase tracking-[0.2em] relative z-10 leading-relaxed font-semibold shrink-0">
               Ensure your device is powered on.<br />
-              <span className="text-white mt-0.5 block opacity-70 normal-case tracking-normal font-sans font-normal text-xs sm:text-sm">Press the pairing button until it flashes <span className="text-cyan-400 font-bold uppercase font-mono text-xs">CYAN</span>.</span>
+              <span className="text-white mt-0.5 block opacity-70 normal-case tracking-normal font-sans font-normal text-xs">
+                Press the pairing button until it flashes <span className="text-cyan-400 font-bold uppercase font-mono text-xs">CYAN</span>.
+              </span>
             </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3 w-full relative z-10 shrink-0">
-              <button 
-                 onClick={processSerialConnection}
-                 className="py-3 px-3 bg-cyan-500 hover:bg-cyan-400 text-black text-[10px] uppercase tracking-widest font-bold rounded-lg shadow-[0_0_20px_rgba(6,182,212,0.4)] transition-all flex flex-col justify-center items-center gap-0.5"
-              >
-                <div className="flex items-center gap-1.5">
-                  <Bluetooth size={14} />
-                  <span>Bluetooth Classic SPP</span>
+            {/* Error or Status Message Banner inside Scan Modal */}
+            {scanErrorMessage && (
+              <div className="w-full mb-3 p-3 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[11px] font-mono leading-relaxed relative z-10 shrink-0">
+                {scanErrorMessage}
+              </div>
+            )}
+
+            {/* NATIVE ANDROID BLUETOOTH CLASSIC SPP DEVICE PICKER POPUP */}
+            {showNativeBtPicker ? (
+              <div className="w-full relative z-10 flex flex-col gap-3 shrink-0">
+                <div className="flex items-center justify-between bg-cyan-950/40 border border-cyan-500/30 rounded-lg px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <Bluetooth size={14} className="text-cyan-400" />
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-cyan-300 font-bold">
+                      {isScanningNativeBt ? 'Scanning Bluetooth Devices...' : 'Available Bluetooth Devices'}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => loadNativeAndroidBluetoothDevices(true)}
+                    disabled={isScanningNativeBt}
+                    className="text-[10px] font-mono uppercase font-bold text-cyan-400 hover:text-cyan-300 flex items-center gap-1 disabled:opacity-50"
+                  >
+                    <RefreshCw size={12} className={isScanningNativeBt ? 'animate-spin' : ''} />
+                    <span>{isScanningNativeBt ? 'Scanning' : 'Scan Nearby'}</span>
+                  </button>
                 </div>
-                <span className="text-[8px] text-black/80 normal-case tracking-normal font-semibold">Recommended for XIM4 (Write Enabled)</span>
-              </button>
 
-              <button 
-                 onClick={processWebUSBConnection}
-                 className="py-3 px-3 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-all flex flex-col justify-center items-center gap-0.5"
-              >
-                <div className="flex items-center gap-1.5">
-                  <Usb size={14} className="text-cyan-400" />
-                  <span>USB-OTG / WebUSB</span>
+                {/* Paired Devices Section */}
+                <div className="bg-black/50 border border-white/10 rounded-xl p-2.5 max-h-56 overflow-y-auto custom-scrollbar space-y-2">
+                  <div className="text-[9px] font-mono uppercase tracking-widest text-slate-400 px-1 font-bold">
+                    Paired Bluetooth Devices ({nativePairedDevices.length})
+                  </div>
+
+                  {nativePairedDevices.length === 0 && !isScanningNativeBt && (
+                    <div className="text-[11px] text-slate-400 p-2.5 bg-white/5 rounded-lg text-center">
+                      No paired devices found. Pair your <b>XIM4</b> in Android Bluetooth Settings or tap <b>Scan Nearby</b> above.
+                    </div>
+                  )}
+
+                  {nativePairedDevices.map((dev, idx) => {
+                    const addr = dev.address || dev.id || `paired-${idx}`;
+                    const isXim = (dev.name || '').toUpperCase().includes('XIM');
+                    const isConnectingThis = connectingNativeMac === addr;
+                    return (
+                      <button
+                        key={addr}
+                        onClick={() => handleSelectNativeAndroidDevice(dev)}
+                        disabled={Boolean(connectingNativeMac)}
+                        className={`w-full p-2.5 rounded-lg border text-left transition-all flex items-center justify-between gap-2 ${
+                          isXim
+                            ? 'bg-cyan-500/15 border-cyan-500/50 hover:bg-cyan-500/25 text-white shadow-[0_0_15px_rgba(6,182,212,0.2)]'
+                            : 'bg-white/5 border-white/10 hover:bg-white/10 text-slate-200'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-bold text-xs truncate">{dev.name || 'Unnamed Bluetooth Device'}</span>
+                            {isXim && (
+                              <span className="text-[8px] font-mono uppercase px-1.5 py-0.5 rounded bg-cyan-500 text-black font-black shrink-0">
+                                XIM4 MATCH
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] font-mono text-slate-400 truncate">{addr}</div>
+                        </div>
+                        <span className="px-2.5 py-1.5 rounded bg-cyan-500 text-black font-mono font-bold text-[10px] uppercase tracking-wider shrink-0">
+                          {isConnectingThis ? 'Connecting...' : 'Connect'}
+                        </span>
+                      </button>
+                    );
+                  })}
+
+                  {/* Unpaired / Discovered Nearby Devices Section */}
+                  {nativeDiscoveredDevices.length > 0 && (
+                    <div className="pt-2 border-t border-white/10 space-y-2">
+                      <div className="text-[9px] font-mono uppercase tracking-widest text-emerald-400 px-1 font-bold">
+                        Discovered Nearby Devices ({nativeDiscoveredDevices.length})
+                      </div>
+                      {nativeDiscoveredDevices.map((dev, idx) => {
+                        const addr = dev.address || dev.id || `disc-${idx}`;
+                        const isXim = (dev.name || '').toUpperCase().includes('XIM');
+                        const isConnectingThis = connectingNativeMac === addr;
+                        return (
+                          <button
+                            key={addr}
+                            onClick={() => handleSelectNativeAndroidDevice(dev)}
+                            disabled={Boolean(connectingNativeMac)}
+                            className={`w-full p-2.5 rounded-lg border text-left transition-all flex items-center justify-between gap-2 ${
+                              isXim
+                                ? 'bg-emerald-500/15 border-emerald-500/50 hover:bg-emerald-500/25 text-white'
+                                : 'bg-white/5 border-white/10 hover:bg-white/10 text-slate-200'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="font-bold text-xs truncate">{dev.name || 'Nearby Bluetooth Device'}</div>
+                              <div className="text-[10px] font-mono text-slate-400 truncate">{addr}</div>
+                            </div>
+                            <span className="px-2.5 py-1.5 rounded bg-emerald-500 text-black font-mono font-bold text-[10px] uppercase tracking-wider shrink-0">
+                              {isConnectingThis ? 'Pairing...' : 'Pair & Connect'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-                <span className="text-[8px] text-cyan-400/70 normal-case tracking-normal font-normal">Direct Cable to Phone or PC</span>
-              </button>
 
-              <button 
-                 onClick={processBluetoothConnection}
-                 className="py-2.5 sm:py-3 px-3 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-all flex flex-col justify-center items-center gap-0.5"
-              >
-                <span>Web Bluetooth (BLE)</span>
-                <span className="text-[8px] text-slate-500 normal-case tracking-normal font-normal">XIM APEX / BLE Read-Only</span>
-              </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => loadNativeAndroidBluetoothDevices(true)}
+                    disabled={isScanningNativeBt}
+                    className="flex-1 py-2.5 px-3 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-300 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-all flex items-center justify-center gap-1.5"
+                  >
+                    <RefreshCw size={12} className={isScanningNativeBt ? 'animate-spin' : ''} />
+                    <span>{isScanningNativeBt ? 'Scanning Nearby...' : 'Scan Unpaired Nearby'}</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowNativeBtPicker(false);
+                      setScanErrorMessage(null);
+                    }}
+                    className="py-2.5 px-4 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-colors"
+                  >
+                    Back
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3 w-full relative z-10 shrink-0">
+                <button 
+                   onClick={processSerialConnection}
+                   className="py-3 px-3 bg-cyan-500 hover:bg-cyan-400 text-black text-[10px] uppercase tracking-widest font-bold rounded-lg shadow-[0_0_20px_rgba(6,182,212,0.4)] transition-all flex flex-col justify-center items-center gap-0.5"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <Bluetooth size={14} />
+                    <span>Bluetooth Classic SPP</span>
+                  </div>
+                  <span className="text-[8px] text-black/80 normal-case tracking-normal font-semibold">Recommended for XIM4 (Write Enabled)</span>
+                </button>
 
-              <button 
-                 onClick={() => setShowScanModal(false)}
-                 className="py-2.5 sm:py-3 px-3 bg-black/40 hover:bg-white/5 border border-white/10 text-slate-400 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-colors flex items-center justify-center"
-              >
-                Cancel
-              </button>
-            </div>
+                <button 
+                   onClick={processWebUSBConnection}
+                   className="py-3 px-3 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-all flex flex-col justify-center items-center gap-0.5"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <Usb size={14} className="text-cyan-400" />
+                    <span>USB-OTG / WebUSB</span>
+                  </div>
+                  <span className="text-[8px] text-cyan-400/70 normal-case tracking-normal font-normal">Direct Cable to Phone or PC</span>
+                </button>
+
+                <button 
+                   onClick={processBluetoothConnection}
+                   className="py-2.5 sm:py-3 px-3 bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-all flex flex-col justify-center items-center gap-0.5"
+                >
+                  <span>Web Bluetooth (BLE)</span>
+                  <span className="text-[8px] text-slate-500 normal-case tracking-normal font-normal">XIM APEX / BLE Read-Only</span>
+                </button>
+
+                <button 
+                   onClick={() => {
+                     setShowNativeBtPicker(false);
+                     setScanErrorMessage(null);
+                     setShowScanModal(false);
+                   }}
+                   className="py-2.5 sm:py-3 px-3 bg-black/40 hover:bg-white/5 border border-white/10 text-slate-400 text-[10px] uppercase tracking-widest font-bold rounded-lg transition-colors flex items-center justify-center"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
 
             {/* Native Android APK (.zip) Banner inside Scan Modal */}
             <div className="w-full mt-3 relative z-10 shrink-0">
