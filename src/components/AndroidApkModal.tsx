@@ -295,33 +295,8 @@ jobs:
           fi
           npx cap sync android
 
-      - name: Inject Android 12-14+ Bluetooth Classic SPP (RFCOMM) Permissions into AndroidManifest.xml
-        run: |
-          node -e '
-            const fs = require("fs");
-            const manifestPath = "android/app/src/main/AndroidManifest.xml";
-            if (fs.existsSync(manifestPath)) {
-              let xml = fs.readFileSync(manifestPath, "utf8");
-              const perms = [
-                "android.permission.BLUETOOTH",
-                "android.permission.BLUETOOTH_ADMIN",
-                "android.permission.BLUETOOTH_CONNECT",
-                "android.permission.BLUETOOTH_SCAN",
-                "android.permission.ACCESS_FINE_LOCATION",
-                "android.permission.ACCESS_COARSE_LOCATION"
-              ];
-              let tagsToAdd = "";
-              for (const p of perms) {
-                if (!xml.includes(p)) {
-                  tagsToAdd += "    <uses-permission android:name=\\"" + p + "\\" />\\n";
-                }
-              }
-              if (tagsToAdd) {
-                xml = xml.replace("<application", tagsToAdd + "    <application");
-                fs.writeFileSync(manifestPath, xml, "utf8");
-              }
-            }
-          '
+      - name: Patch Android 12-14+ Bluetooth Classic SPP Runtime Permissions & Manifest
+        run: node scripts/patch-android-bluetooth.mjs
 
       - name: Build Android APK via Gradle
         working-directory: ./android

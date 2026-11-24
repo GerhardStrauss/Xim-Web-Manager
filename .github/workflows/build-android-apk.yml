@@ -46,92 +46,7 @@ jobs:
           npx cap sync android
 
       - name: Patch Android 12-14+ Bluetooth Classic SPP Runtime Permissions & Manifest
-        run: |
-          node -e '
-            const fs = require("fs");
-
-            // 1. Inject Android 12-14+ Bluetooth permissions into AndroidManifest.xml
-            const manifestPath = "android/app/src/main/AndroidManifest.xml";
-            if (fs.existsSync(manifestPath)) {
-              let xml = fs.readFileSync(manifestPath, "utf8");
-              const perms = [
-                "android.permission.BLUETOOTH",
-                "android.permission.BLUETOOTH_ADMIN",
-                "android.permission.BLUETOOTH_CONNECT",
-                "android.permission.BLUETOOTH_SCAN",
-                "android.permission.ACCESS_FINE_LOCATION",
-                "android.permission.ACCESS_COARSE_LOCATION"
-              ];
-              let tagsToAdd = "";
-              for (const p of perms) {
-                if (!xml.includes(p)) {
-                  tagsToAdd += `    <uses-permission android:name="${p}" />\n`;
-                }
-              }
-              if (tagsToAdd) {
-                xml = xml.replace("<application", tagsToAdd + "    <application");
-                fs.writeFileSync(manifestPath, xml, "utf8");
-                console.log("Injected Bluetooth permissions into AndroidManifest.xml");
-              }
-            }
-
-            // 2. Patch MainActivity.java to request Android 12-14+ BLUETOOTH_CONNECT & BLUETOOTH_SCAN runtime permissions on launch
-            const mainActPath = "android/app/src/main/java/com/xim/webmanager/MainActivity.java";
-            if (fs.existsSync(mainActPath)) {
-              const mainActCode = `package com.xim.webmanager;
-
-import android.Manifest;
-import android.content.pm.PackageManager;
-import android.os.Build;
-import android.os.Bundle;
-import androidx.core.app.ActivityCompat;
-import androidx.core.content.ContextCompat;
-import com.getcapacitor.BridgeActivity;
-import java.util.ArrayList;
-import java.util.List;
-
-public class MainActivity extends BridgeActivity {
-    @Override
-    public void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        requestBluetoothPermissionsIfNeeded();
-    }
-
-    private void requestBluetoothPermissionsIfNeeded() {
-        List<String> needed = new ArrayList<>();
-        if (Build.VERSION.SDK_INT >= 31) {
-            if (ContextCompat.checkSelfPermission(this, "android.permission.BLUETOOTH_CONNECT") != PackageManager.PERMISSION_GRANTED) {
-                needed.add("android.permission.BLUETOOTH_CONNECT");
-            }
-            if (ContextCompat.checkSelfPermission(this, "android.permission.BLUETOOTH_SCAN") != PackageManager.PERMISSION_GRANTED) {
-                needed.add("android.permission.BLUETOOTH_SCAN");
-            }
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        }
-        if (!needed.isEmpty()) {
-            ActivityCompat.requestPermissions(this, needed.toArray(new String[0]), 1001);
-        }
-    }
-}
-`;
-              fs.writeFileSync(mainActPath, mainActCode, "utf8");
-              console.log("Patched MainActivity.java with Android 12-14+ BLUETOOTH_CONNECT & BLUETOOTH_SCAN runtime permission prompt");
-            }
-
-            // 3. Patch BluetoothSerial.java in cordova-plugin-bluetooth-serial so ACCESS_COARSE_LOCATION check does not block Android 12+ discovery
-            const btSerialPath = "android/capacitor-cordova-android-plugins/src/main/java/com/megster/cordova/BluetoothSerial.java";
-            if (fs.existsSync(btSerialPath)) {
-              let btCode = fs.readFileSync(btSerialPath, "utf8");
-              btCode = btCode.replace(
-                "if (cordova.hasPermission(ACCESS_COARSE_LOCATION)) {",
-                "if (android.os.Build.VERSION.SDK_INT >= 31 || cordova.hasPermission(ACCESS_COARSE_LOCATION)) {"
-              );
-              fs.writeFileSync(btSerialPath, btCode, "utf8");
-              console.log("Patched BluetoothSerial.java for Android 12-14+ discovery compatibility");
-            }
-          '
+        run: node scripts/patch-android-bluetooth.mjs
 
       - name: Build Android APK via Gradle
         working-directory: ./android
@@ -143,14 +58,7 @@ public class MainActivity extends BridgeActivity {
         run: |
           mkdir -p release_out
           cp android/app/build/outputs/apk/debug/app-debug.apk release_out/XIM4-Web-Manager-SPP.apk
-          cat << 'EOF' > release_out/README-INSTALL.txt
-          XIM Web Manager — Native Android APK (Bluetooth Classic SPP 0x1101 Edition)
-          ===========================================================================
-          1. Extract "XIM4-Web-Manager-SPP.apk" from this .zip file on your Android phone.
-          2. Tap "XIM4-Web-Manager-SPP.apk" to install (allow "Install unknown apps" if prompted).
-          3. Press the 'P' button on the back of your XIM4 until it flashes Cyan/Blue, and pair XIM4 in Android Bluetooth Settings.
-          4. Open the XIM Web Manager app, allow the "Nearby Devices" permission prompt, and tap "Options -> Connect Hardware -> Bluetooth Classic SPP" to pick your XIM4 from the interactive Bluetooth Device Picker!
-          EOF
+          printf "XIM Web Manager — Native Android APK (Bluetooth Classic SPP 0x1101 Edition)\n===========================================================================\n1. Extract XIM4-Web-Manager-SPP.apk from this .zip file on your Android phone.\n2. Tap XIM4-Web-Manager-SPP.apk to install.\n3. Pair your XIM4 in Android Bluetooth Settings, then open the app and tap Options -> Connect Hardware -> Bluetooth Classic SPP.\n" > release_out/README-INSTALL.txt
           cd release_out
           zip -r ../xim-web-manager-android-apk.zip XIM4-Web-Manager-SPP.apk README-INSTALL.txt
 
