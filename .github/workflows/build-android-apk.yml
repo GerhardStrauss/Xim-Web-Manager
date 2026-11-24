@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-android-apk:
     name: Compile Native XIM4 Bluetooth SPP Android APK (.zip)
@@ -58,6 +61,7 @@ jobs:
         run: |
           mkdir -p release_out
           cp android/app/build/outputs/apk/debug/app-debug.apk release_out/XIM4-Web-Manager-SPP.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk ./XIM4-Web-Manager-SPP.apk
           printf "XIM Web Manager — Native Android APK (Bluetooth Classic SPP 0x1101 Edition)\n===========================================================================\n1. Extract XIM4-Web-Manager-SPP.apk from this .zip file on your Android phone.\n2. Tap XIM4-Web-Manager-SPP.apk to install.\n3. Pair your XIM4 in Android Bluetooth Settings, then open the app and tap Options -> Connect Hardware -> Bluetooth Classic SPP.\n" > release_out/README-INSTALL.txt
           cd release_out
           zip -r ../xim-web-manager-android-apk.zip XIM4-Web-Manager-SPP.apk README-INSTALL.txt
@@ -68,3 +72,19 @@ jobs:
           name: xim-web-manager-android-apk-zip
           path: xim-web-manager-android-apk.zip
           if-no-files-found: error
+
+      - name: Publish Compiled APK & ZIP to GitHub Release (latest-apk)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-apk
+          name: "XIM4 Native Android APK (Latest Cloud Build)"
+          body: |
+            Automated Native Android APK build for XIM Web Manager (`com.xim.webmanager`) with Bluetooth Classic SPP (`RFCOMM 0x1101`) & Android 12–14+ runtime permissions.
+            - **Direct APK Install**: Download `XIM4-Web-Manager-SPP.apk`
+            - **Zipped APK Package**: Download `xim-web-manager-android-apk.zip`
+          files: |
+            xim-web-manager-android-apk.zip
+            XIM4-Web-Manager-SPP.apk
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
